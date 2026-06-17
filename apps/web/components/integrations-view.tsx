@@ -2302,6 +2302,27 @@ export function IntegrationsView({
 		staleTime: 30 * 1000,
 	})
 
+	const { data: facetsData } = useQuery({
+		queryKey: ["document-facets", []],
+		queryFn: async () => {
+			const response = await $fetch("@post/documents/documents/facets", {
+				body: { containerTags: [] },
+				disableValidation: true,
+			})
+			if (response.error)
+				throw new Error(response.error?.message || "Failed to fetch facets")
+			return response.data as {
+				facets: Array<{ category: string; count: number }>
+				total: number
+			}
+		},
+		staleTime: 5 * 60 * 1000,
+		enabled: !publicMode,
+	})
+
+	const tweetCount =
+		facetsData?.facets.find((f) => f.category === "tweet")?.count ?? 0
+
 	const keyPrefix = useCallback((key: ListedApiKey): string | null => {
 		return key.start ?? (key.name?.startsWith("sm_") ? key.name : null)
 	}, [])
@@ -2514,9 +2535,12 @@ export function IntegrationsView({
 			if (item.kind === "connector") {
 				return connectionsByProvider[item.provider].length > 0
 			}
+			if (item.kind === "import") {
+				return tweetCount > 0
+			}
 			return false
 		},
-		[activePluginById, connectionsByProvider, publicMode],
+		[activePluginById, connectionsByProvider, publicMode, tweetCount],
 	)
 
 	const counts = useMemo<Record<CategoryFilter, number>>(
@@ -3117,6 +3141,10 @@ export function IntegrationsView({
 				const count = connectionsByProvider[item.provider].length
 				if (count <= 0) return null
 				return <ConnectionsCountPill count={count} />
+			}
+			case "import": {
+				if (tweetCount <= 0) return null
+				return <ConnectionsCountPill count={1} />
 			}
 			default:
 				return null
