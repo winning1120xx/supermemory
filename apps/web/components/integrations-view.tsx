@@ -1058,6 +1058,29 @@ function ConnectionsCountPill({ count }: { count: number }) {
 	)
 }
 
+function ImportedPill({
+	lastImportedAt,
+}: {
+	lastImportedAt: string | number | Date | null
+}) {
+	return (
+		<span
+			className={cn(
+				dmSans125ClassName(),
+				"flex shrink-0 items-center gap-1.5 text-[12px] font-medium text-[#00AC3F] sm:text-[13px]",
+			)}
+		>
+			<span className="size-[7px] rounded-full bg-[#00AC3F]" />
+			Imported
+			{lastImportedAt && (
+				<span className="text-[11px] font-normal text-[#737373]">
+					· {formatRelativeTime(lastImportedAt)}
+				</span>
+			)}
+		</span>
+	)
+}
+
 const CONNECTOR_META: Record<
 	ConnectorProvider,
 	{ name: string; icon: ReactNode; documentLabel: string }
@@ -2302,26 +2325,34 @@ export function IntegrationsView({
 		staleTime: 30 * 1000,
 	})
 
-	const { data: facetsData } = useQuery({
-		queryKey: ["document-facets", []],
+	const { data: xBookmarksImport } = useQuery({
+		queryKey: ["x-bookmarks-import-status"],
 		queryFn: async () => {
-			const response = await $fetch("@post/documents/documents/facets", {
-				body: { containerTags: [] },
+			const response = await $fetch("@post/documents/documents", {
+				body: {
+					page: 1,
+					limit: 1,
+					sort: "createdAt",
+					order: "desc",
+					categories: ["tweet"],
+				},
 				disableValidation: true,
 			})
 			if (response.error)
-				throw new Error(response.error?.message || "Failed to fetch facets")
-			return response.data as {
-				facets: Array<{ category: string; count: number }>
-				total: number
+				throw new Error(
+					response.error?.message || "Failed to load X bookmarks status",
+				)
+			return {
+				count: response.data?.pagination?.totalItems ?? 0,
+				lastImportedAt: response.data?.documents?.[0]?.createdAt ?? null,
 			}
 		},
 		staleTime: 5 * 60 * 1000,
 		enabled: !publicMode,
 	})
 
-	const tweetCount =
-		facetsData?.facets.find((f) => f.category === "tweet")?.count ?? 0
+	const tweetCount = xBookmarksImport?.count ?? 0
+	const lastTweetImportAt = xBookmarksImport?.lastImportedAt ?? null
 
 	const keyPrefix = useCallback((key: ListedApiKey): string | null => {
 		return key.start ?? (key.name?.startsWith("sm_") ? key.name : null)
@@ -3144,7 +3175,7 @@ export function IntegrationsView({
 			}
 			case "import": {
 				if (tweetCount <= 0) return null
-				return <ConnectionsCountPill count={1} />
+				return <ImportedPill lastImportedAt={lastTweetImportAt} />
 			}
 			default:
 				return null
