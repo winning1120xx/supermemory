@@ -9,6 +9,7 @@ import { toast } from "sonner"
 import { $fetch } from "@lib/api"
 import { useAuth } from "@lib/auth-context"
 import { analytics } from "@/lib/analytics"
+import { fetchSpaceSettings, spaceSettingsKey } from "@/hooks/use-space-context"
 
 /** Pull the human-readable message out of a $fetch error (handles `{error}`/`{message}`/string). */
 function fetchErrorMessage(err: unknown, fallback: string): string {
@@ -209,6 +210,7 @@ function restoreQueriesFromSnapshot(
 }
 
 const FILE_UPLOAD_CONCURRENCY = 3
+const BULK_LINK_BATCH_SIZE = 500
 const fullDocumentQueryKey = (documentId: string) =>
 	["document-full", documentId] as const
 
@@ -225,7 +227,23 @@ export function useDocumentMutations({
 	const queryClient = useQueryClient()
 	const { user } = useAuth()
 
-	const entityContext = `This is ${user?.name ?? "a user"}, saving items in a personal knowledge management system. This may be websites, links, notes, journals, PDFs, etc. Understand the user from it into a graph.`
+	const defaultEntityContext = `This is ${user?.name ?? "a user"}, saving items in a personal knowledge management system. This may be websites, links, notes, journals, PDFs, etc. Understand the user from it into a graph.`
+
+	// Skip when the space has its own context — sending one would overwrite the stored value.
+	const resolveEntityContext = async (
+		project: string,
+	): Promise<string | undefined> => {
+		try {
+			const settings = await queryClient.fetchQuery({
+				queryKey: spaceSettingsKey(project),
+				queryFn: () => fetchSpaceSettings(project),
+				staleTime: 60 * 1000,
+			})
+			return settings?.entityContext ? undefined : defaultEntityContext
+		} catch {
+			return defaultEntityContext
+		}
+	}
 
 	const noteMutation = useMutation({
 		mutationFn: async ({
@@ -235,11 +253,12 @@ export function useDocumentMutations({
 			content: string
 			project: string
 		}) => {
+			const entityContext = await resolveEntityContext(project)
 			const response = await $fetch("@post/documents", {
 				body: {
 					content,
 					containerTags: [project],
-					entityContext,
+					...(entityContext !== undefined ? { entityContext } : {}),
 					metadata: { sm_source: "consumer" },
 				},
 			})
@@ -299,11 +318,12 @@ export function useDocumentMutations({
 
 	const linkMutation = useMutation({
 		mutationFn: async ({ url, project }: { url: string; project: string }) => {
+			const entityContext = await resolveEntityContext(project)
 			const response = await $fetch("@post/documents", {
 				body: {
 					content: url,
 					containerTags: [project],
-					entityContext,
+					...(entityContext !== undefined ? { entityContext } : {}),
 					metadata: { sm_source: "consumer" },
 				},
 			})
@@ -361,6 +381,100 @@ export function useDocumentMutations({
 		},
 	})
 
+	const bulkLinkMutation = useMutation({
+		mutationFn: async ({
+			urls,
+			project,
+		}: {
+			urls: string[]
+			project: string
+		}): Promise<{ success: number; failed: number }> => {
+			let success = 0
+			let failed = 0
+
+			for (let i = 0; i < urls.length; i += BULK_LINK_BATCH_SIZE) {
+				const chunk = urls.slice(i, i + BULK_LINK_BATCH_SIZE)
+				const response = await $fetch("@post/documents/batch", {
+					body: {
+						documents: chunk.map((url) => ({
+							content: url,
+							containerTags: [project],
+							entityContext,
+							metadata: { sm_source: "consumer" },
+						})),
+					},
+				})
+				if (response.error) {
+					throw new Error(response.error?.message || "Failed to add links")
+				}
+				success += response.data?.success ?? 0
+				failed += response.data?.failed ?? 0
+			}
+
+			return { success, failed }
+		},
+		onMutate: async ({ urls, project }) => {
+			const previousQueries = await cancelAndSnapshotQueries(queryClient)
+			const now = new Date().toISOString()
+
+			for (const url of urls) {
+				const optimisticMemory: OptimisticMemory = {
+					id: `temp-${crypto.randomUUID()}`,
+					content: "",
+					url,
+					title: "Processing...",
+					description: "Extracting content...",
+					containerTags: [project],
+					createdAt: now,
+					updatedAt: now,
+					status: "queued",
+					type: "link",
+					metadata: {
+						processingStage: "queued",
+						processingMessage: "Added to processing queue",
+					},
+					memoryEntries: [],
+					isOptimistic: true,
+				}
+				queryClient.setQueriesData(
+					{ queryKey: ["documents-with-memories"] },
+					(old) => addOptimisticMemoryToQueryData(old, optimisticMemory),
+				)
+			}
+
+			return { previousQueries }
+		},
+		onError: (error, _variables, context) => {
+			restoreQueriesFromSnapshot(queryClient, context?.previousQueries)
+			toast.error("Failed to add links", {
+				description: error instanceof Error ? error.message : "Unknown error",
+			})
+		},
+		onSuccess: (data, variables) => {
+			for (let i = 0; i < data.success; i++) {
+				analytics.documentAdded({ type: "link", project_id: variables.project })
+			}
+			queryClient.invalidateQueries({ queryKey: ["documents-with-memories"] })
+			queryClient.invalidateQueries({ queryKey: ["processing-documents"] })
+			if (data.failed === 0) {
+				toast.success(`${data.success} links added!`, {
+					description: "Your links are being processed",
+				})
+				onClose?.()
+				return
+			}
+			if (data.success === 0) {
+				toast.error("Failed to add links", {
+					description: `All ${data.failed} links failed`,
+				})
+				return
+			}
+			toast.warning("Some links failed", {
+				description: `${data.success} added, ${data.failed} failed`,
+			})
+		},
+	})
+
 	const fileMutation = useMutation({
 		mutationFn: async ({
 			fileEntries,
@@ -375,12 +489,15 @@ export function useDocumentMutations({
 		}): Promise<FileUploadBatchResult> => {
 			const applyMeta = fileEntries.length === 1
 			const failures: { id: string; message: string }[] = []
+			const entityContext = await resolveEntityContext(project)
 
 			const uploadOne = async (entry: FileUploadEntry) => {
 				const formData = new FormData()
 				formData.append("file", entry.file)
 				formData.append("containerTags", JSON.stringify([project]))
-				formData.append("entityContext", entityContext)
+				if (entityContext !== undefined) {
+					formData.append("entityContext", entityContext)
+				}
 				formData.append("metadata", JSON.stringify({ sm_source: "consumer" }))
 
 				const response = await fetch(
@@ -647,6 +764,7 @@ export function useDocumentMutations({
 	return {
 		noteMutation,
 		linkMutation,
+		bulkLinkMutation,
 		fileMutation,
 		updateMutation,
 		deleteMutation,
