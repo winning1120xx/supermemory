@@ -461,7 +461,7 @@ export function StepSources({
 							</button>
 							<SourceActions
 								connectedCount={connectedCount}
-								onContinue={onContinue}
+								onContinue={handleContinue}
 								className="mt-0 px-0"
 							/>
 						</div>
@@ -756,27 +756,6 @@ function OnboardingPlanCard({
 					<span className="whitespace-nowrap text-[#737373] text-[10px]">
 						Everything in {plan.includesFrom}, plus
 					</span>
-				</button>
-				<div className="flex items-center gap-[22px]">
-					<button
-						type="button"
-						onClick={handleContinue}
-						className="text-[#737373] font-medium text-[14px] hover:text-[#999] transition-colors"
-					>
-						Skip for now
-					</button>
-					<Button
-						variant="insideOut"
-						onClick={handleContinue}
-						disabled={connectedCount === 0}
-						className="rounded-full px-5 py-[10px] text-[13px] font-medium text-[#fafafa]"
-					>
-						Continue
-						{connectedCount > 0 && (
-							<span className="text-[#4BA0FA] ml-1">({connectedCount})</span>
-						)}
-						<ArrowRight className="size-3.5" />
-					</Button>
 					<div className="h-px flex-1 bg-white/[0.08]" />
 				</div>
 			) : null}
